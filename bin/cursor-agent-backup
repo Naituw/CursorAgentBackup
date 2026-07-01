@@ -1,0 +1,87 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+# shellcheck source=../lib/common.sh
+. "$SCRIPT_DIR/../lib/common.sh"
+
+usage() {
+  cat <<'EOF'
+Usage: cursor-agent-backup [options] [VERSION ...]
+
+Archive installed Cursor Agent CLI versions.
+
+Options:
+  --all                 Archive every installed version
+  --output DIR          Output directory (default: repository dist/)
+  --versions-dir DIR    Official versions directory
+  --force               Replace existing archives
+  -h, --help            Show this help
+
+With no VERSION and without --all, archives the version used by `agent`.
+EOF
+}
+
+OUTPUT_DIR="$SCRIPT_DIR/../dist"
+VERSIONS_DIR="${CURSOR_AGENT_VERSIONS_DIR:-$HOME/.local/share/cursor-agent/versions}"
+ALL=0
+FORCE=0
+VERSIONS=()
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --all) ALL=1; shift ;;
+    --output) [ "$#" -ge 2 ] || die "--output requires a value"; OUTPUT_DIR=$2; shift 2 ;;
+    --versions-dir) [ "$#" -ge 2 ] || die "--versions-dir requires a value"; VERSIONS_DIR=$2; shift 2 ;;
+    --force) FORCE=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    --*) die "Unknown option: $1" ;;
+    *) VERSIONS+=("$1"); shift ;;
+  esac
+done
+
+[ -d "$VERSIONS_DIR" ] || die "Versions directory not found: $VERSIONS_DIR"
+require_command tar
+mkdir -p "$OUTPUT_DIR"
+
+if [ "$ALL" -eq 1 ]; then
+  [ "${#VERSIONS[@]}" -eq 0 ] || die "--all cannot be combined with explicit versions"
+  while IFS= read -r version; do
+    VERSIONS+=("$version")
+  done < <(find "$VERSIONS_DIR" -mindepth 1 -maxdepth 1 -type d ! -name '.*' ! -name dev -exec basename {} \; | sort)
+elif [ "${#VERSIONS[@]}" -eq 0 ]; then
+  AGENT_BIN=$(command -v agent || true)
+  [ -n "$AGENT_BIN" ] || die "agent is not in PATH; pass a VERSION explicitly"
+  # Resolve the symlink itself rather than only its containing ~/.local/bin directory.
+  if command -v realpath >/dev/null 2>&1; then
+    AGENT_REAL=$(realpath "$AGENT_BIN")
+  else
+    AGENT_REAL=$(readlink "$AGENT_BIN")
+  fi
+  VERSION=$(basename "$(dirname "$AGENT_REAL")")
+  VERSIONS+=("$VERSION")
+fi
+
+[ "${#VERSIONS[@]}" -gt 0 ] || die "No installed versions found"
+PLATFORM=$(platform_id)
+
+for VERSION in "${VERSIONS[@]}"; do
+  validate_version "$VERSION"
+  SOURCE="$VERSIONS_DIR/$VERSION"
+  [ -x "$SOURCE/cursor-agent" ] || die "Version is missing cursor-agent: $SOURCE"
+  ARCHIVE="$OUTPUT_DIR/cursor-agent-$VERSION-$PLATFORM.tar.gz"
+  CHECKSUM="$ARCHIVE.sha256"
+  if [ -e "$ARCHIVE" ] && [ "$FORCE" -ne 1 ]; then
+    die "Archive already exists: $ARCHIVE (use --force to replace it)"
+  fi
+  TEMP="$ARCHIVE.partial.$$"
+  rm -f "$TEMP"
+  trap 'rm -f "$TEMP"' EXIT HUP INT TERM
+  info "Archiving $VERSION ($PLATFORM)"
+  tar -C "$VERSIONS_DIR" -czf "$TEMP" "$VERSION"
+  mv -f "$TEMP" "$ARCHIVE"
+  trap - EXIT HUP INT TERM
+  HASH=$(sha256_file "$ARCHIVE")
+  printf '%s  %s\n' "$HASH" "$(basename "$ARCHIVE")" > "$CHECKSUM"
+  info "Created $ARCHIVE"
+done

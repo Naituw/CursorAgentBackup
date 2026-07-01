@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+# shellcheck source=../lib/common.sh
+. "$SCRIPT_DIR/../lib/common.sh"
+
+usage() {
+  cat <<'EOF'
+Usage: cursor-agent-publish [options] VERSION [VERSION ...]
+
+Create one GitHub Release per Cursor version and upload matching archives.
+
+Options:
+  --repo OWNER/REPO     GitHub repository (default: Naituw/CursorAgentBackup)
+  --dir DIR             Archive directory (default: repository dist/)
+  --clobber             Replace same-named release assets
+  -h, --help            Show this help
+EOF
+}
+
+REPO="${CURSOR_AGENT_BACKUP_REPO:-Naituw/CursorAgentBackup}"
+ARCHIVE_DIR="$SCRIPT_DIR/../dist"
+CLOBBER=0
+VERSIONS=()
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --repo) [ "$#" -ge 2 ] || die "--repo requires a value"; REPO=$2; shift 2 ;;
+    --dir) [ "$#" -ge 2 ] || die "--dir requires a value"; ARCHIVE_DIR=$2; shift 2 ;;
+    --clobber) CLOBBER=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    --*) die "Unknown option: $1" ;;
+    *) VERSIONS+=("$1"); shift ;;
+  esac
+done
+
+[ "${#VERSIONS[@]}" -gt 0 ] || die "Pass at least one VERSION"
+require_command gh
+
+for VERSION in "${VERSIONS[@]}"; do
+  validate_version "$VERSION"
+  TAG="cursor-agent-$VERSION"
+  ASSETS=()
+  for ARCHIVE in "$ARCHIVE_DIR"/cursor-agent-"$VERSION"-*.tar.gz; do
+    [ -f "$ARCHIVE" ] || continue
+    verify_archive "$ARCHIVE" "$ARCHIVE.sha256"
+    ASSETS+=("$ARCHIVE" "$ARCHIVE.sha256")
+  done
+  [ "${#ASSETS[@]}" -gt 0 ] || die "No archives found for $VERSION in $ARCHIVE_DIR"
+
+  if ! gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+    gh release create "$TAG" --repo "$REPO" \
+      --title "Cursor Agent $VERSION" \
+      --notes "Archived Cursor Agent CLI release $VERSION. These assets are preserved for version rollback and pinned aliases."
+  fi
+
+  UPLOAD_ARGS=()
+  [ "$CLOBBER" -eq 0 ] || UPLOAD_ARGS+=(--clobber)
+  gh release upload "$TAG" --repo "$REPO" "${UPLOAD_ARGS[@]}" "${ASSETS[@]}"
+  info "Published $TAG"
+done

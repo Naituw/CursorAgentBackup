@@ -1,0 +1,10 @@
+.DS_Store
+*.tmp
+*.partial
+
+# Release archives are uploaded to GitHub Releases, not committed to Git.
+/dist/*
+!/dist/.gitkeep
+
+# Local test output.
+/tmp/

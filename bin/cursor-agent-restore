@@ -1,0 +1,88 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+# shellcheck source=../lib/common.sh
+. "$SCRIPT_DIR/../lib/common.sh"
+
+usage() {
+  cat <<'EOF'
+Usage: cursor-agent-restore VERSION [options]
+
+Restore the official `agent` and `cursor-agent` commands to a preserved version.
+
+Options:
+  --repo OWNER/REPO     Release repository (default: Naituw/CursorAgentBackup)
+  --archive FILE        Use a local archive instead of downloading
+  --bin-dir DIR         Official command directory (default: ~/.local/bin)
+  --versions-dir DIR    Official versions directory
+  --force               Replace non-symlink command files
+  -h, --help            Show this help
+EOF
+}
+
+REPO="${CURSOR_AGENT_BACKUP_REPO:-Naituw/CursorAgentBackup}"
+BIN_DIR="${CURSOR_AGENT_BIN_DIR:-$HOME/.local/bin}"
+VERSIONS_DIR="${CURSOR_AGENT_VERSIONS_DIR:-$HOME/.local/share/cursor-agent/versions}"
+ARCHIVE=
+VERSION=
+FORCE=0
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --repo) [ "$#" -ge 2 ] || die "--repo requires a value"; REPO=$2; shift 2 ;;
+    --archive) [ "$#" -ge 2 ] || die "--archive requires a value"; ARCHIVE=$2; shift 2 ;;
+    --bin-dir) [ "$#" -ge 2 ] || die "--bin-dir requires a value"; BIN_DIR=$2; shift 2 ;;
+    --versions-dir) [ "$#" -ge 2 ] || die "--versions-dir requires a value"; VERSIONS_DIR=$2; shift 2 ;;
+    --force) FORCE=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    --*) die "Unknown option: $1" ;;
+    *) [ -z "$VERSION" ] || die "Only one VERSION may be restored"; VERSION=$1; shift ;;
+  esac
+done
+
+[ -n "$VERSION" ] || die "VERSION is required"
+validate_version "$VERSION"
+TARGET="$VERSIONS_DIR/$VERSION"
+
+if [ ! -x "$TARGET/cursor-agent" ]; then
+  TEMP_DIR=
+  if [ -z "$ARCHIVE" ]; then
+    TEMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/cursor-agent-download.XXXXXX")
+    trap 'rm -rf "$TEMP_DIR"' EXIT HUP INT TERM
+    ARCHIVE=$(download_archive "$REPO" "$VERSION" "$TEMP_DIR" | tail -n 1)
+  fi
+  verify_archive "$ARCHIVE" "$ARCHIVE.sha256"
+  validate_archive_layout "$ARCHIVE" "$VERSION"
+  install_archive_tree "$ARCHIVE" "$VERSION" "$TARGET"
+fi
+
+mkdir -p "$BIN_DIR" "$VERSIONS_DIR/.rollback"
+for NAME in agent cursor-agent; do
+  LINK="$BIN_DIR/$NAME"
+  if { [ -e "$LINK" ] || [ -L "$LINK" ]; } && [ ! -L "$LINK" ] && [ "$FORCE" -ne 1 ]; then
+    die "$LINK is not a symlink (use --force to replace it)"
+  fi
+done
+
+STAMP=$(date -u '+%Y%m%dT%H%M%SZ')
+STATE="$VERSIONS_DIR/.rollback/$STAMP.txt"
+{
+  printf 'restored_version=%s\n' "$VERSION"
+  for NAME in agent cursor-agent; do
+    LINK="$BIN_DIR/$NAME"
+    if [ -L "$LINK" ]; then
+      printf 'previous_%s=%s\n' "$NAME" "$(readlink "$LINK")"
+    elif [ -e "$LINK" ]; then
+      printf 'previous_%s=<non-symlink>\n' "$NAME"
+    else
+      printf 'previous_%s=<missing>\n' "$NAME"
+    fi
+  done
+} > "$STATE"
+
+for NAME in agent cursor-agent; do
+  atomic_symlink "$TARGET/cursor-agent" "$BIN_DIR/$NAME"
+done
+info "Restored agent and cursor-agent to $VERSION"
+info "Previous targets recorded in $STATE"

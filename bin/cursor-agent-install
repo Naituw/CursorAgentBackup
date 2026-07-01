@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+# shellcheck source=../lib/common.sh
+. "$SCRIPT_DIR/../lib/common.sh"
+
+usage() {
+  cat <<'EOF'
+Usage:
+  cursor-agent-install VERSION --alias NAME [options]
+  cursor-agent-install --list [--repo OWNER/REPO]
+
+Install a pinned Cursor Agent version alongside the official `agent` command.
+
+Options:
+  --alias NAME          Command name to create, for example agent2 (required)
+  --repo OWNER/REPO     Release repository (default: Naituw/CursorAgentBackup)
+  --archive FILE        Use a local archive instead of downloading
+  --bin-dir DIR         Alias directory (default: ~/.local/bin)
+  --root DIR            Pinned installation root
+  --force               Replace an existing alias
+  --list                List versions published in GitHub Releases
+  -h, --help            Show this help
+EOF
+}
+
+REPO="${CURSOR_AGENT_BACKUP_REPO:-Naituw/CursorAgentBackup}"
+BIN_DIR="${CURSOR_AGENT_BIN_DIR:-$HOME/.local/bin}"
+PINNED_ROOT="${CURSOR_AGENT_PINNED_ROOT:-$HOME/.local/share/cursor-agent-pinned/versions}"
+ALIAS=
+ARCHIVE=
+VERSION=
+FORCE=0
+LIST=0
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --alias) [ "$#" -ge 2 ] || die "--alias requires a value"; ALIAS=$2; shift 2 ;;
+    --repo) [ "$#" -ge 2 ] || die "--repo requires a value"; REPO=$2; shift 2 ;;
+    --archive) [ "$#" -ge 2 ] || die "--archive requires a value"; ARCHIVE=$2; shift 2 ;;
+    --bin-dir) [ "$#" -ge 2 ] || die "--bin-dir requires a value"; BIN_DIR=$2; shift 2 ;;
+    --root) [ "$#" -ge 2 ] || die "--root requires a value"; PINNED_ROOT=$2; shift 2 ;;
+    --force) FORCE=1; shift ;;
+    --list) LIST=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    --*) die "Unknown option: $1" ;;
+    *) [ -z "$VERSION" ] || die "Only one VERSION may be installed"; VERSION=$1; shift ;;
+  esac
+done
+
+if [ "$LIST" -eq 1 ]; then
+  [ -z "$VERSION$ALIAS$ARCHIVE" ] || die "--list cannot be combined with install options"
+  require_command curl
+  require_command jq
+  curl -fsSL "https://api.github.com/repos/$REPO/releases?per_page=100" |
+    jq -r '.[].tag_name | select(startswith("cursor-agent-")) | sub("^cursor-agent-"; "")'
+  exit 0
+fi
+
+[ -n "$VERSION" ] || die "VERSION is required"
+[ -n "$ALIAS" ] || die "--alias is required"
+validate_version "$VERSION"
+validate_alias "$ALIAS"
+PLATFORM=$(platform_id)
+
+TEMP_DIR=
+if [ -z "$ARCHIVE" ]; then
+  TEMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/cursor-agent-download.XXXXXX")
+  trap 'rm -rf "$TEMP_DIR"' EXIT HUP INT TERM
+  ARCHIVE=$(download_archive "$REPO" "$VERSION" "$TEMP_DIR" | tail -n 1)
+fi
+CHECKSUM="$ARCHIVE.sha256"
+verify_archive "$ARCHIVE" "$CHECKSUM"
+validate_archive_layout "$ARCHIVE" "$VERSION"
+
+TARGET="$PINNED_ROOT/$VERSION/$PLATFORM"
+install_archive_tree "$ARCHIVE" "$VERSION" "$TARGET"
+
+mkdir -p "$BIN_DIR"
+LINK="$BIN_DIR/$ALIAS"
+if [ -e "$LINK" ] || [ -L "$LINK" ]; then
+  if [ -L "$LINK" ] && [ "$(readlink "$LINK")" = "$TARGET/cursor-agent" ]; then
+    info "$ALIAS already points to $VERSION"
+    exit 0
+  fi
+  [ "$FORCE" -eq 1 ] || die "$LINK already exists (use --force to replace it)"
+fi
+atomic_symlink "$TARGET/cursor-agent" "$LINK"
+info "Installed Cursor Agent $VERSION as $LINK"
