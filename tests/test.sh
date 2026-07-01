@@ -52,4 +52,19 @@ if "$ROOT/bin/cursor-agent-install" "$VERSION" --alias agent3 \
   exit 1
 fi
 
+MOCK_BIN="$WORK/mock-bin"
+GH_LOG="$WORK/gh.log"
+export GH_LOG
+mkdir -p "$MOCK_BIN"
+cat > "$MOCK_BIN/gh" <<'EOF'
+#!/usr/bin/env bash
+if [ "${1:-}" = release ] && [ "${2:-}" = view ]; then
+  exit 0
+fi
+printf '%s\n' "$*" >> "$GH_LOG"
+EOF
+chmod +x "$MOCK_BIN/gh"
+PATH="$MOCK_BIN:$PATH" "$ROOT/bin/cursor-agent-publish" --dir "$DIST" "$VERSION"
+grep -q '^release upload ' "$GH_LOG"
+
 printf 'All tests passed\n'

@@ -55,8 +55,10 @@ for VERSION in "${VERSIONS[@]}"; do
       --notes "Archived Cursor Agent CLI release $VERSION. These assets are preserved for version rollback and pinned aliases."
   fi
 
-  UPLOAD_ARGS=()
-  [ "$CLOBBER" -eq 0 ] || UPLOAD_ARGS+=(--clobber)
-  gh release upload "$TAG" --repo "$REPO" "${UPLOAD_ARGS[@]}" "${ASSETS[@]}"
+  if [ "$CLOBBER" -eq 1 ]; then
+    gh release upload "$TAG" --repo "$REPO" --clobber "${ASSETS[@]}"
+  else
+    gh release upload "$TAG" --repo "$REPO" "${ASSETS[@]}"
+  fi
   info "Published $TAG"
 done
